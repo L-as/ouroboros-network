@@ -45,8 +45,10 @@ import           Codec.Serialise.Class (Serialise)
 import           Data.Bifoldable
 import           Data.Bifunctor
 import           Data.Bitraversable
+import           Data.Bool (bool)
 import           Data.ByteString.Lazy (ByteString)
 import qualified Data.ByteString.Lazy as LBS
+import           Data.Foldable (foldMap')
 import           Data.Functor (void, ($>), (<&>))
 import           Data.List (dropWhileEnd, find, mapAccumL, intercalate, (\\), delete, foldl')
 import           Data.List.NonEmpty (NonEmpty (..))
@@ -92,6 +94,8 @@ import           Ouroboros.Network.IOManager
 import           Ouroboros.Network.InboundGovernor (InboundGovernorTrace (..),
                    RemoteSt (..))
 import qualified Ouroboros.Network.InboundGovernor as IG
+import           Ouroboros.Network.InboundGovernor.State
+                   (InboundGovernorCounters(..))
 import qualified Ouroboros.Network.InboundGovernor.ControlChannel as Server
 import           Ouroboros.Network.Mux
 import           Ouroboros.Network.MuxMode
@@ -149,6 +153,10 @@ tests =
                  prop_connection_manager_valid_transition_order
   , testProperty "inbound_governor_valid_transition_order"
                  prop_inbound_governor_valid_transition_order
+  , testProperty "connection_manager_counters"
+                 prop_connection_manager_counters
+  , testProperty "inbound_governor_counters"
+                 prop_inbound_governor_counters
   , testGroup    "unit_server_accept_error"
     [ testProperty "throw ConnectionAborted"
                   (unit_server_accept_error IOErrConnectionAborted IOErrThrow)
@@ -2153,6 +2161,173 @@ prop_connection_manager_valid_transition_order serverAcc (ArbDataFlow dataFlow)
 
 -- | Property wrapping `multinodeExperiment`.
 --
+-- Note: this test validates connection manager counters using an upper bound
+-- approach since there's no reliable way to reconstruct the value that the
+-- counters should have at a given point in time. It's not quite possible to
+-- have the god's view of the system consistent with the information that's
+-- traced because there can be timing issues where a connection is in
+-- TerminatingSt (hence counted as 0) but in the God's view the connection is
+-- still being deleted (hence counted as 1). This is all due to the not having
+-- a better way of injecting god's view traces in a way that the timing issues
+-- aren't an issue.
+--
+prop_connection_manager_counters :: Int
+                                 -> ArbDataFlow
+                                 -> MultiNodeScript Int TestAddr
+                                 -> Property
+prop_connection_manager_counters serverAcc (ArbDataFlow dataFlow)
+                                 script@(MultiNodeScript l) =
+  let trace = runSimTrace sim
+
+      evsCMT :: Trace (SimResult ())
+                        (ConnectionManagerTrace
+                          SimAddr
+                          (ConnectionHandlerTrace
+                            UnversionedProtocol
+                            DataFlowProtocolData))
+      evsCMT = traceWithNameTraceEvents trace
+
+      -- Needed for calculating a more accurate upper bound
+      evsUS :: [ObservableNetworkState SimAddr]
+      evsUS = selectTraceEventsDynamic trace
+
+      upperBound =
+        collapseCounters True
+        $ multiNodeScriptToCounters dataFlow l evsUS
+
+  in tabulate "ConnectionEvents" (map showCEvs l)
+    . counterexample (ppScript script)
+    . counterexample (Trace.ppTrace show show evsCMT)
+    . counterexample (intercalate "\n" $ map show evsUS)
+    . getAllProperty
+    . bifoldMap
+       ( \ case
+           MainReturn {} -> mempty
+           v             -> AllProperty
+                            $ counterexample (show v) (property False)
+       )
+       ( \ trs
+        -> case trs of
+          TrConnectionManagerCounters cmc ->
+            AllProperty
+              $ counterexample
+                  ("Upper bound is: " ++ show upperBound
+                  ++ "\n But got: " ++ show cmc)
+                  (property $ collapseCounters False cmc <= upperBound)
+          _                               ->
+            mempty
+       )
+    $ evsCMT
+  where
+    serverAddress :: SimAddr
+    serverAddress = TestAddress 0
+
+    -- We count all connections as prunable because we do not have a better way
+    -- to know what transitions will a given connection go through. We also
+    -- count every client connection as unidirectional because they do not
+    -- negotiate duplex data flow.
+    --
+    -- We do not count Incoming/Outgoing/Closing of connections since the
+    -- UniverseState is a much more reliable source of information.
+    multiNodeScriptToCounters :: DataFlow
+                              -> [ConnectionEvent Int TestAddr]
+                              -> [ObservableNetworkState SimAddr]
+                              -> ConnectionManagerCounters
+    multiNodeScriptToCounters df ces uss =
+      let ifDuplex = bool 0 1 (df == Duplex)
+          ifUni = bool 0 1 (df == Unidirectional)
+          ceCounters = foldMap' id
+                     . foldl'
+                        (\ st ce -> case ce of
+                          StartClient _ ta ->
+                            Map.insert ta (ConnectionManagerCounters 1 0 1 0 0) st
+                          StartServer _ ta _ ->
+                            Map.insert ta (ConnectionManagerCounters 1 ifDuplex ifUni 0 0) st
+                          _ -> st
+                        )
+                        Map.empty
+                     $ ces
+          usCounters = foldl'
+                        (\cmc (ObservableNetworkState conns) ->
+                          maxCounters cmc $
+                          Map.foldl'
+                           (\cmc' provenance ->
+                             cmc' <>
+                             if provenance == serverAddress
+                                then ConnectionManagerCounters 0 0 0 0 1
+                                else ConnectionManagerCounters 0 0 0 1 0
+                           )
+                           mempty
+                           conns
+                        )
+                       mempty
+                       uss
+       in maxCounters ceCounters usCounters
+
+    maxCounters :: ConnectionManagerCounters
+                -> ConnectionManagerCounters
+                -> ConnectionManagerCounters
+    maxCounters (ConnectionManagerCounters a b c d e)
+                (ConnectionManagerCounters a' b' c' d' e') =
+      ConnectionManagerCounters
+        (max a a')
+        (max b b')
+        (max c c')
+        (max d d')
+        (max e e')
+
+    -- It is possible for the UniverseState to have discrepancies between the
+    -- counters traced by TrConnectionManagerCounters. This leads to different
+    -- observations where an inbound connection can go into a state that is
+    -- counted as outbound but the provenance in the Snocket's Universe state
+    -- does not change so we can not know for sure what's happening inside the
+    -- ConnectionManager's state machine.
+    --
+    -- Given this we collapse the count of incoming and outgoing connections
+    -- since this value should always be the same in both views. Note that for
+    -- values besides the upper bound we have to correct the sum by removing the
+    -- duplicates.
+    --
+    -- TODO: Try idea in: ouroboros-network/pull/3429#discussion_r746406157
+    --
+    collapseCounters :: Bool -- ^ Should we remove Duplex duplicate counters out
+                             -- of the total sum.
+                     -> ConnectionManagerCounters
+                     -> (Int, Int, Int, Int)
+    collapseCounters t (ConnectionManagerCounters a b c d e) =
+      if t
+         then (a, b, c, d + e)
+         else (a, b, c, d + e - a)
+
+    universeStateTracer getUniverse = Tracer $ \_ -> do
+      universe <- getUniverse
+      traceM universe
+
+    sim :: IOSim s ()
+    sim = do
+      mb <- timeout 7200
+                    ( withSnocket nullTracer
+                                  (singletonScript noAttenuation)
+              $ \snocket getUniverse ->
+                multinodeExperiment  (Tracer traceM)
+                                     (Tracer traceM)
+                                     (Tracer traceM)
+                                     (Tracer traceM
+                                     <> universeStateTracer getUniverse)
+                                     snocket
+                                     Snocket.TestFamily
+                                     serverAddress
+                                     serverAcc
+                                     dataFlow
+                                     maxAcceptedConnectionsLimit
+                                     (unTestAddr <$> MultiNodeScript l)
+              )
+      case mb of
+        Nothing -> throwIO (SimulationTimeout :: ExperimentError SimAddr)
+        Just a  -> return a
+
+-- | Property wrapping `multinodeExperiment`.
+--
 -- Note: this test validates inbound governor state changes.
 --
 prop_inbound_governor_valid_transitions :: Int
@@ -2325,6 +2500,107 @@ prop_inbound_governor_valid_transition_order serverAcc (ArbDataFlow dataFlow)
                        (Script (toBearerInfo absBi :| [noAttenuation]))
                        maxAcceptedConnectionsLimit l
 
+-- | Property wrapping `multinodeExperiment`.
+--
+-- Note: this test validates inbound governor counters.
+--
+prop_inbound_governor_counters :: Int
+                               -> ArbDataFlow
+                               -> MultiNodeScript Int TestAddr
+                               -> Property
+prop_inbound_governor_counters serverAcc (ArbDataFlow dataFlow)
+                               script@(MultiNodeScript l) =
+  let trace = runSimTrace sim
+
+      evsIGT :: Trace (SimResult ())
+                        (InboundGovernorTrace
+                          SimAddr)
+      evsIGT = traceWithNameTraceEvents trace
+
+      upperBound = multiNodeScriptToCounters l
+
+  in tabulate "ConnectionEvents" (map showCEvs l)
+    . counterexample (ppScript script)
+    . counterexample (Trace.ppTrace show show evsIGT)
+    . getAllProperty
+    . bifoldMap
+       ( \ case
+           MainReturn {} -> mempty
+           v             -> AllProperty
+                            $ counterexample (show v) (property False)
+       )
+       ( \ trs
+        -> case trs of
+          TrInboundGovernorCounters igc ->
+            AllProperty
+              $ counterexample
+                  ("Upper bound is: " ++ show upperBound
+                  ++ "\n But got: " ++ show igc)
+                  (property $ igc <= upperBound)
+          _                               ->
+            mempty
+       )
+    $ evsIGT
+  where
+    bundleToCounters :: Bundle [Int] -> InboundGovernorCounters
+    bundleToCounters (Bundle hot warm _) =
+      let warmRemote = bool 1 0 (null warm)
+          hotRemote  = bool 1 0 (null hot)
+       in InboundGovernorCounters warmRemote hotRemote
+
+    -- We check for starting of miniprotocols that can potentially lead to
+    -- inbound governor states of remote warm or remote hot connections. An
+    -- upper bound is established because it is not possible to predict whether
+    -- some failure will occur.
+    multiNodeScriptToCounters :: [ConnectionEvent Int TestAddr]
+                              -> InboundGovernorCounters
+    multiNodeScriptToCounters =
+      let taServerAcc = TestAddr (TestAddress 0)
+       in
+        (\x ->
+          let serverAccEntry = x Map.! taServerAcc
+              mapWithoutServerAcc = Map.delete taServerAcc x
+           in Map.foldlWithKey'
+                (\igt ta entry ->
+                  case Map.lookup ta serverAccEntry of
+                    Nothing  -> igt <> foldMap' bundleToCounters entry
+                    Just bun -> igt <> foldMap' bundleToCounters entry
+                                   <> bundleToCounters bun
+                )
+                mempty
+                mapWithoutServerAcc
+
+        )
+        . foldl'
+          (\ st ce -> case ce of
+            StartClient _ ta ->
+              Map.insertWith (<>) ta Map.empty st
+            StartServer _ ta _ ->
+              Map.insertWith (<>) ta Map.empty st
+            InboundConnection _ ta ->
+              Map.update (Just . Map.insertWith (<>) taServerAcc mempty)
+                         ta
+                         st
+            OutboundConnection _ ta ->
+              Map.update (Just . Map.insertWith (<>) ta mempty)
+                         taServerAcc
+                         st
+            InboundMiniprotocols _ ta bun ->
+              Map.update (Just . Map.update (Just . (<> bun)) taServerAcc)
+                         ta
+                         st
+            OutboundMiniprotocols _ ta bun ->
+              Map.update (Just . Map.update (Just . (<> bun)) ta)
+                         taServerAcc
+                         st
+            _ -> st
+          )
+          (Map.singleton taServerAcc Map.empty)
+
+    sim :: IOSim s ()
+    sim = multiNodeSim serverAcc dataFlow
+                       (singletonScript noAttenuation)
+                       maxAcceptedConnectionsLimit l
 
 -- | Property wrapping `multinodeExperiment` that has a generator optimized for triggering
 -- pruning, and random generated number of connections hard limit.
