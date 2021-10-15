@@ -998,7 +998,7 @@ prop_channel_simultaneous_open_sim codec versionDataCodec
                                    clientVersions serverVersions =
     let attenuation = noAttenuation { biConnectionDelay = 1 } in
     withSnocket nullTracer
-                (singletonScript attenuation)
+                (singletonScript $ singletonScript attenuation)
               $ \sn _ -> do
       let addr, addr' :: TestAddress Int
           addr  = Snocket.TestAddress 1

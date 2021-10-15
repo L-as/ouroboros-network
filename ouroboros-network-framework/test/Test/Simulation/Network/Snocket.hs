@@ -66,7 +66,9 @@ import           Network.TypedProtocol.ReqResp.Client
 import           Network.TypedProtocol.ReqResp.Server
 
 import           Test.Ouroboros.Network.Orphans ()  -- ShowProxy ReqResp instance
-import           Ouroboros.Network.Testing.Data.Script (Script(..))
+-- ShowProxy ReqResp instance
+import           Ouroboros.Network.Testing.Data.Script
+                  (Script(..), singletonScript)
 
 import           Test.QuickCheck hiding (Result (..))
 import           Test.QuickCheck.Instances.ByteString
@@ -176,11 +178,12 @@ clientServerSimulation
        , Show payload
        , Ord (Async m ())
        )
-    => Script BearerInfo
+    => Script (Script BearerInfo)
     -> [payload]
     -> m (Maybe Bool)
 clientServerSimulation script payloads =
-    withSnocket nullTracer script $ \snocket _ ->
+    withSnocket nullTracer script
+    $ \snocket _ ->
       withAsync (server snocket) $ \_serverAsync -> do
         res <- untilSuccess (client snocket)
         return (Just res)
@@ -338,8 +341,8 @@ toBearerInfo abi =
 -- Properties
 --
 
-prop_client_server :: [ByteString] -> BearerInfoScript -> Property
-prop_client_server payloads (BearerInfoScript script) =
+prop_client_server :: [ByteString] -> Script BearerInfoScript -> Property
+prop_client_server payloads (Script script) =
     let tr = runSimTrace $ clientServerSimulation script' payloads
     in -- Debug.traceShow script $
        case traceResult True tr of
@@ -356,7 +359,10 @@ prop_client_server payloads (BearerInfoScript script) =
          Right Nothing  -> property False
          Right (Just b) -> property b
   where
-    script' = toBearerInfo <$> script
+    Script noAttenuationScript =
+      singletonScript (BearerInfoScript (singletonScript absNoAttenuation))
+    script' =
+      (toBearerInfo <$>) . unBIScript <$> Script (script <> noAttenuationScript)
 
 
 --

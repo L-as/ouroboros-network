@@ -53,6 +53,7 @@ import           Data.Functor (void, ($>), (<&>))
 import           Data.List (dropWhileEnd, find, mapAccumL, intercalate, (\\), delete, foldl')
 import           Data.List.NonEmpty (NonEmpty (..))
 import qualified Data.List.Trace as Trace
+import qualified Data.List.NonEmpty as NonEmpty (fromList)
 import qualified Data.Map.Strict as Map
 import           Data.Maybe (fromMaybe, fromJust, isJust)
 import           Data.Monoid (Sum (..))
@@ -115,15 +116,16 @@ import qualified Ouroboros.Network.Snocket as Snocket
 
 import           Simulation.Network.Snocket
 
-import           Ouroboros.Network.Testing.Data.Script (Script (..), singletonScript)
-import           Ouroboros.Network.Testing.Utils (genDelayWithPrecision)
-import           Test.Ouroboros.Network.Orphans ()  -- ShowProxy ReqResp instance
-import           Test.Simulation.Network.Snocket hiding (tests)
-import           Test.Ouroboros.Network.ConnectionManager (verifyAbstractTransition)
 import           Ouroboros.Network.Testing.Data.AbsBearerInfo
                    (NonFailingBearerInfoScript(..), AbsBearerInfo (..),
                     AbsDelay (..), AbsAttenuation (..), AbsSpeed (..),
-                    AbsSDUSize (..), BearerInfoScript (BearerInfoScript))
+                    AbsSDUSize (..), BearerInfoScript (..))
+import           Ouroboros.Network.Testing.Data.Script (singletonScript)
+import           Ouroboros.Network.Testing.Utils (genDelayWithPrecision)
+
+import           Test.Ouroboros.Network.Orphans ()  -- ShowProxy ReqResp instance
+import           Test.Simulation.Network.Snocket hiding (tests)
+import           Test.Ouroboros.Network.ConnectionManager (verifyAbstractTransition)
 
 tests :: TestTree
 tests =
@@ -854,18 +856,19 @@ unidirectionalExperiment timeouts snocket socket clientAndServerData = do
                 (property True)
                 $ zip rs (expectedResult clientAndServerData clientAndServerData)
 
-prop_unidirectional_Sim :: NonFailingBearerInfoScript
+prop_unidirectional_Sim :: Script NonFailingBearerInfoScript
                         -> ClientAndServerData Int
                         -> Property
-prop_unidirectional_Sim (NonFailingBearerInfoScript script) clientAndServerData =
+prop_unidirectional_Sim script clientAndServerData =
   simulatedPropertyWithTimeout 7200 $
     withSnocket nullTracer
-                (toBearerInfo <$> script) $ \snock _ ->
-      bracket (Snocket.open snock Snocket.TestFamily)
-              (Snocket.close snock) $ \fd -> do
-        Snocket.bind   snock fd serverAddr
-        Snocket.listen snock fd
-        unidirectionalExperiment simTimeouts snock fd clientAndServerData
+                ((toBearerInfo <$>) . unNFBIScript <$> script)
+      $ \snock _ ->
+        bracket (Snocket.open snock Snocket.TestFamily)
+                (Snocket.close snock) $ \fd -> do
+          Snocket.bind   snock fd serverAddr
+          Snocket.listen snock fd
+          unidirectionalExperiment simTimeouts snock fd clientAndServerData
   where
     serverAddr = Snocket.TestAddress (0 :: Int)
 
@@ -1015,11 +1018,11 @@ bidirectionalExperiment
                 ))
 
 
-prop_bidirectional_Sim :: NonFailingBearerInfoScript -> ClientAndServerData Int -> ClientAndServerData Int -> Property
-prop_bidirectional_Sim (NonFailingBearerInfoScript script) data0 data1 =
+prop_bidirectional_Sim :: Script NonFailingBearerInfoScript -> ClientAndServerData Int -> ClientAndServerData Int -> Property
+prop_bidirectional_Sim script data0 data1 =
   simulatedPropertyWithTimeout 7200 $
     withSnocket sayTracer
-                (toBearerInfo <$> script)
+                ((toBearerInfo <$>) . unNFBIScript <$> script)
                 $ \snock _ ->
       bracket ((,) <$> Snocket.open snock Snocket.TestFamily
                    <*> Snocket.open snock Snocket.TestFamily)
@@ -2012,11 +2015,11 @@ verifyRemoteTransitionOrder (h:t) = go t h
 --
 prop_connection_manager_valid_transitions :: Int
                                           -> ArbDataFlow
-                                          -> BearerInfoScript
+                                          -> Script BearerInfoScript
                                           -> MultiNodeScript Int TestAddr
                                           -> Property
 prop_connection_manager_valid_transitions serverAcc (ArbDataFlow dataFlow)
-                                          (BearerInfoScript biScript)
+                                          biScript
                                           script@(MultiNodeScript l) =
   let trace = runSimTrace sim
 
@@ -2072,7 +2075,7 @@ prop_connection_manager_valid_transitions serverAcc (ArbDataFlow dataFlow)
   where
     sim :: IOSim s ()
     sim = multiNodeSim serverAcc dataFlow
-                       biScript
+                       (unBIScript <$> biScript)
                        maxAcceptedConnectionsLimit l
 
 -- | Property wrapping `multinodeExperiment`.
@@ -2082,11 +2085,11 @@ prop_connection_manager_valid_transitions serverAcc (ArbDataFlow dataFlow)
 --
 prop_connection_manager_no_invalid_traces :: Int
                                           -> ArbDataFlow
-                                          -> BearerInfoScript
+                                          -> Script BearerInfoScript
                                           -> MultiNodeScript Int TestAddr
                                           -> Property
 prop_connection_manager_no_invalid_traces serverAcc (ArbDataFlow dataFlow)
-                                          (BearerInfoScript biScript)
+                                          biScript
                                           (MultiNodeScript l) =
   let trace = runSimTrace sim
 
@@ -2124,7 +2127,7 @@ prop_connection_manager_no_invalid_traces serverAcc (ArbDataFlow dataFlow)
   where
     sim :: IOSim s ()
     sim = multiNodeSim serverAcc dataFlow
-                       biScript
+                       (unBIScript <$> biScript)
                        maxAcceptedConnectionsLimit l
 
 -- | Property wrapping `multinodeExperiment`.
@@ -2133,11 +2136,11 @@ prop_connection_manager_no_invalid_traces serverAcc (ArbDataFlow dataFlow)
 --
 prop_connection_manager_valid_transition_order :: Int
                                                -> ArbDataFlow
-                                               -> BearerInfoScript
+                                               -> Script BearerInfoScript
                                                -> MultiNodeScript Int TestAddr
                                                -> Property
 prop_connection_manager_valid_transition_order serverAcc (ArbDataFlow dataFlow)
-                                               (BearerInfoScript biScript)
+                                               biScript
                                                script@(MultiNodeScript l) =
   let trace = runSimTrace sim
 
@@ -2159,7 +2162,7 @@ prop_connection_manager_valid_transition_order serverAcc (ArbDataFlow dataFlow)
   where
     sim :: IOSim s ()
     sim = multiNodeSim serverAcc dataFlow
-                       biScript
+                       (unBIScript <$> biScript)
                        maxAcceptedConnectionsLimit l
 
 -- | Check connection manager counters in `multinodeExperiment`.
@@ -2176,11 +2179,11 @@ prop_connection_manager_valid_transition_order serverAcc (ArbDataFlow dataFlow)
 --
 prop_connection_manager_counters :: Int
                                -> ArbDataFlow
-                               -> NonFailingBearerInfoScript
+                               -> Script NonFailingBearerInfoScript
                                -> MultiNodeScript Int TestAddr
                                -> Property
 prop_connection_manager_counters serverAcc (ArbDataFlow dataFlow)
-                                 (NonFailingBearerInfoScript nfbiScript)
+                                 nfbiScript
                                  script@(MultiNodeScript l) =
   let trace = runSimTrace sim
 
@@ -2312,7 +2315,7 @@ prop_connection_manager_counters serverAcc (ArbDataFlow dataFlow)
     sim = do
       mb <- timeout 7200
                     ( withSnocket nullTracer
-                                  (toBearerInfo <$> nfbiScript)
+                                  ((toBearerInfo <$>) . unNFBIScript <$> nfbiScript)
               $ \snocket getUniverse ->
                 multinodeExperiment  (Tracer traceM)
                                      (Tracer traceM)
@@ -2337,11 +2340,11 @@ prop_connection_manager_counters serverAcc (ArbDataFlow dataFlow)
 --
 prop_inbound_governor_valid_transitions :: Int
                                         -> ArbDataFlow
-                                        -> BearerInfoScript
+                                        -> Script BearerInfoScript
                                         -> MultiNodeScript Int TestAddr
                                         -> Property
 prop_inbound_governor_valid_transitions serverAcc (ArbDataFlow dataFlow)
-                                        (BearerInfoScript biScript)
+                                        biScript
                                         script@(MultiNodeScript l) =
   let trace = runSimTrace sim
 
@@ -2369,7 +2372,7 @@ prop_inbound_governor_valid_transitions serverAcc (ArbDataFlow dataFlow)
   where
     sim :: IOSim s ()
     sim = multiNodeSim serverAcc dataFlow
-                       biScript
+                       (unBIScript <$> biScript)
                        maxAcceptedConnectionsLimit l
 
 -- | Property wrapping `multinodeExperiment`.
@@ -2378,11 +2381,11 @@ prop_inbound_governor_valid_transitions serverAcc (ArbDataFlow dataFlow)
 --
 prop_inbound_governor_no_unsupported_state :: Int
                                            -> ArbDataFlow
-                                           -> BearerInfoScript
+                                           -> Script BearerInfoScript
                                            -> MultiNodeScript Int TestAddr
                                            -> Property
 prop_inbound_governor_no_unsupported_state serverAcc (ArbDataFlow dataFlow)
-                                           (BearerInfoScript biScript)
+                                           biScript
                                            script@(MultiNodeScript l) =
   let trace = runSimTrace sim
 
@@ -2420,7 +2423,7 @@ prop_inbound_governor_no_unsupported_state serverAcc (ArbDataFlow dataFlow)
   where
     sim :: IOSim s ()
     sim = multiNodeSim serverAcc dataFlow
-                       biScript
+                       (unBIScript <$> biScript)
                        maxAcceptedConnectionsLimit l
 
 -- | Property wrapping `multinodeExperiment`.
@@ -2430,11 +2433,11 @@ prop_inbound_governor_no_unsupported_state serverAcc (ArbDataFlow dataFlow)
 --
 prop_inbound_governor_no_invalid_traces :: Int
                                         -> ArbDataFlow
-                                        -> BearerInfoScript
+                                        -> Script BearerInfoScript
                                         -> MultiNodeScript Int TestAddr
                                         -> Property
 prop_inbound_governor_no_invalid_traces serverAcc (ArbDataFlow dataFlow)
-                                        (BearerInfoScript absBi)
+                                        biScript
                                         (MultiNodeScript l) =
   let trace = runSimTrace sim
 
@@ -2467,7 +2470,7 @@ prop_inbound_governor_no_invalid_traces serverAcc (ArbDataFlow dataFlow)
   where
     sim :: IOSim s ()
     sim = multiNodeSim serverAcc dataFlow
-                       absBi
+                       (unBIScript <$> biScript)
                        maxAcceptedConnectionsLimit l
 
 -- | Property wrapping `multinodeExperiment`.
@@ -2476,11 +2479,11 @@ prop_inbound_governor_no_invalid_traces serverAcc (ArbDataFlow dataFlow)
 --
 prop_inbound_governor_valid_transition_order :: Int
                                              -> ArbDataFlow
-                                             -> BearerInfoScript
+                                             -> Script BearerInfoScript
                                              -> MultiNodeScript Int TestAddr
                                              -> Property
 prop_inbound_governor_valid_transition_order serverAcc (ArbDataFlow dataFlow)
-                                             (BearerInfoScript biScript)
+                                             biScript
                                              script@(MultiNodeScript l) =
   let trace = runSimTrace sim
 
@@ -2506,7 +2509,7 @@ prop_inbound_governor_valid_transition_order serverAcc (ArbDataFlow dataFlow)
   where
     sim :: IOSim s ()
     sim = multiNodeSim serverAcc dataFlow
-                       biScript
+                       (unBIScript <$> biScript)
                        maxAcceptedConnectionsLimit l
 
 -- | Check inbound governor counters in `multinodeExperiment`.
@@ -2515,11 +2518,11 @@ prop_inbound_governor_valid_transition_order serverAcc (ArbDataFlow dataFlow)
 --
 prop_inbound_governor_counters :: Int
                                -> ArbDataFlow
-                               -> NonFailingBearerInfoScript
+                               -> Script NonFailingBearerInfoScript
                                -> MultiNodeScript Int TestAddr
                                -> Property
 prop_inbound_governor_counters serverAcc (ArbDataFlow dataFlow)
-                               (NonFailingBearerInfoScript nfbiScript)
+                               nfbiScript
                                script@(MultiNodeScript l) =
   let trace = runSimTrace sim
 
@@ -2610,7 +2613,7 @@ prop_inbound_governor_counters serverAcc (ArbDataFlow dataFlow)
 
     sim :: IOSim s ()
     sim = multiNodeSim serverAcc dataFlow
-                       nfbiScript
+                       (unNFBIScript <$> nfbiScript)
                        maxAcceptedConnectionsLimit l
 
 -- | Property wrapping `multinodeExperiment` that has a generator optimized for triggering
@@ -2621,11 +2624,11 @@ prop_inbound_governor_counters serverAcc (ArbDataFlow dataFlow)
 -- Manager.
 --
 prop_connection_manager_pruning :: Int
-                                -> NonFailingBearerInfoScript
+                                -> Script NonFailingBearerInfoScript
                                 -> MultiNodePruningScript Int
                                 -> Property
 prop_connection_manager_pruning serverAcc
-                                (NonFailingBearerInfoScript nfbiScript)
+                                nfbiScript
                                 (MultiNodePruningScript acceptedConnLimit l) =
   let trace = runSimTrace sim
 
@@ -2680,7 +2683,8 @@ prop_connection_manager_pruning serverAcc
     $ evsATT
   where
     sim :: IOSim s ()
-    sim = multiNodeSim serverAcc Duplex nfbiScript
+    sim = multiNodeSim serverAcc Duplex
+                       (unNFBIScript <$> nfbiScript)
                        acceptedConnLimit l
 
 -- | Property wrapping `multinodeExperiment` that has a generator optimized for triggering
@@ -2691,11 +2695,11 @@ prop_connection_manager_pruning serverAcc
 -- Inbound Governor.
 --
 prop_inbound_governor_pruning :: Int
-                              -> NonFailingBearerInfoScript
+                              -> Script NonFailingBearerInfoScript
                               -> MultiNodePruningScript Int
                               -> Property
 prop_inbound_governor_pruning serverAcc
-                              (NonFailingBearerInfoScript nfbiScript)
+                              nfbiScript
                               (MultiNodePruningScript acceptedConnLimit l) =
   let trace = runSimTrace sim
 
@@ -2772,7 +2776,8 @@ prop_inbound_governor_pruning serverAcc
    $ (evsRTT, evsIGT)
   where
     sim :: IOSim s ()
-    sim = multiNodeSim serverAcc Duplex nfbiScript
+    sim = multiNodeSim serverAcc Duplex
+                       (unNFBIScript <$> nfbiScript)
                        acceptedConnLimit l
 
 -- | Property wrapping `multinodeExperiment` that has a generator optimized for triggering
@@ -2781,11 +2786,11 @@ prop_inbound_governor_pruning serverAcc
 -- We test that we never go above hard limit of incoming connections.
 --
 prop_never_above_hardlimit :: Int
-                           -> NonFailingBearerInfoScript
+                           -> Script NonFailingBearerInfoScript
                            -> MultiNodePruningScript Int
                            -> Property
 prop_never_above_hardlimit serverAcc
-                           (NonFailingBearerInfoScript nfbiScript)
+                           nfbiScript
                            (MultiNodePruningScript
                              acceptedConnLimit@AcceptedConnectionsLimit
                                { acceptedConnectionsHardLimit = hardlimit }
@@ -2835,7 +2840,8 @@ prop_never_above_hardlimit serverAcc
    $ evsCMT
   where
     sim :: IOSim s ()
-    sim = multiNodeSim serverAcc Duplex nfbiScript
+    sim = multiNodeSim serverAcc Duplex
+                       (unNFBIScript <$> nfbiScript)
                        acceptedConnLimit l
 
 
@@ -2860,7 +2866,8 @@ unit_server_accept_error ioErrType ioErrThrowOrReturn =
                           Nothing                 -> property False
                  )
         $ withSnocket nullTracer
-                      (singletonScript bearerAttenuation )
+                      ( singletonScript
+                      $ singletonScript bearerAttenuation )
         $ \snock _ ->
            bracket ((,) <$> Snocket.open snock Snocket.TestFamily
                         <*> Snocket.open snock Snocket.TestFamily)
@@ -2936,7 +2943,7 @@ unit_server_accept_error ioErrType ioErrThrowOrReturn =
 multiNodeSim :: (Serialise req, Show req, Eq req, Typeable req)
              => req
              -> DataFlow
-             -> Script AbsBearerInfo
+             -> Script (Script AbsBearerInfo)
              -> AcceptedConnectionsLimit
              -> [ConnectionEvent req TestAddr]
              -> IOSim s ()
@@ -2944,7 +2951,7 @@ multiNodeSim serverAcc dataFlow script
              acceptedConnLimit l = do
       mb <- timeout 7200
                     ( withSnocket nullTracer
-                                  (toBearerInfo <$> script)
+                                  ((toBearerInfo <$>) <$> script)
               $ \snocket _ ->
                  multinodeExperiment (Tracer traceM)
                                      (Tracer traceM)
@@ -2968,8 +2975,13 @@ unit_connection_terminated_when_negotiating :: Property
 unit_connection_terminated_when_negotiating =
   let arbDataFlow = ArbDataFlow Unidirectional
       absBearerInfo =
-        BearerInfoScript
-        $ singletonScript
+        Script
+        $ NonEmpty.fromList
+        $ replicate 4
+        $ BearerInfoScript
+        $ Script
+        $ NonEmpty.fromList
+        $ repeat
         $ AbsBearerInfo
            { abiConnectionDelay = SmallDelay
            , abiInboundAttenuation = NoAttenuation FastSpeed
