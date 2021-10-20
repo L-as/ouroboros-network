@@ -9,6 +9,7 @@
 {-# LANGUAGE PolyKinds           #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TupleSections       #-}
+{-# LANGUAGE RankNTypes          #-}
 
 {-# OPTIONS_GHC -Wno-unused-imports #-}
 
@@ -42,6 +43,8 @@ import qualified Data.List as List
 import           Data.List.NonEmpty (NonEmpty (..))
 import qualified Data.List.NonEmpty as NonEmpty
 import           Data.Foldable (traverse_)
+import           Data.Functor (void)
+import qualified Data.Map as Map
 import           Data.Monoid (Any (..))
 import           Data.Set (Set)
 import qualified Data.Set as Set
@@ -79,6 +82,18 @@ tests :: TestTree
 tests =
     testGroup "Simulation.Network.Snocket"
     [ testProperty "client-server" prop_client_server
+    , testProperty "connect_to_accepting_socket"
+                   prop_connect_to_accepting_socket
+    , testProperty "connect_and_not_close"
+                   prop_connect_and_not_close
+    , testProperty "connect_to_not_accepting_socket"
+                   prop_connect_to_not_accepting_socket
+    , testProperty "connect_to_uninitialised_socket"
+                   prop_connect_to_uninitialised_socket
+    , testProperty "connect_to_not_listening_socket"
+                   prop_connect_to_not_listening_socket
+    , testProperty "simultaneous_open"
+                   prop_simultaneous_open
     ]
 
 type TestAddr      = TestAddress Int
@@ -178,13 +193,14 @@ clientServerSimulation
        )
     => Script BearerInfo
     -> [payload]
-    -> m (Maybe Bool)
+    -> m (Either SomeException ())
 clientServerSimulation script payloads =
     withSnocket nullTracer script $ \snocket _ ->
       withAsync (server snocket) $ \_serverAsync -> do
         res <- untilSuccess (client snocket)
-        return (Just res)
-
+        if res
+           then return (Right ())
+           else return (Left (toException UnexpectedOutcome))
   where
     reqRespProtocolNum :: MiniProtocolNum
     reqRespProtocolNum = MiniProtocolNum 0
@@ -338,30 +354,299 @@ toBearerInfo abi =
 -- Properties
 --
 
+data TestError = UnexpectedOutcome
+  deriving (Show, Eq)
+
+instance Exception TestError
+
+prop_verify_simulation
+  :: (forall s . IOSim s (Either SomeException ()))
+  -> Property
+prop_verify_simulation sim =
+  let tr = runSimTrace sim
+   in case traceResult True tr of
+     Left e -> counterexample
+                (unlines
+                  [ "=== Say Events ==="
+                  , unlines (selectTraceEventsSay' tr)
+                  , "=== Trace Events ==="
+                  , unlines (show `map` traceEvents tr)
+                  , "=== Error ==="
+                  , show e ++ "\n"
+                  ])
+                False
+     Right (Left e) -> counterexample
+                        (unlines
+                          [ "=== Say Events ==="
+                          , unlines (selectTraceEventsSay' tr)
+                          , "=== Trace Events ==="
+                          , unlines (show `map` traceEvents tr)
+                          , "=== Error ==="
+                          , show e ++ "\n"
+                          ])
+                        False
+     Right (Right _) -> property True
+
 prop_client_server :: [ByteString] -> BearerInfoScript -> Property
 prop_client_server payloads (BearerInfoScript script) =
-    let tr = runSimTrace $ clientServerSimulation script' payloads
-    in -- Debug.traceShow script $
-       case traceResult True tr of
-         Left e         -> counterexample
-                             (unlines
-                               [ "=== Say Events ==="
-                               , unlines (selectTraceEventsSay' tr)
-                               , "=== Error ==="
-                               , show e ++ "\n"
-                               , "=== Trace Events ==="
-                               , unlines (show `map` traceEvents tr)
-                               ])
-                             False
-         Right Nothing  -> property False
-         Right (Just b) -> property b
+  prop_verify_simulation sim
   where
+    sim :: forall s . IOSim s (Either SomeException ())
+    sim = clientServerSimulation script' payloads
+
     script' = toBearerInfo <$> script
 
+prop_connect_to_accepting_socket :: BearerInfoScript -> Property
+prop_connect_to_accepting_socket (BearerInfoScript script) =
+    prop_verify_simulation sim
+  where
+    serverAddr :: TestAddress Int
+    serverAddr = TestAddress 0
+
+    clientAddr :: TestAddress Int
+    clientAddr = TestAddress 1
+
+    sim :: forall s . IOSim s (Either SomeException ())
+    sim =
+      withSnocket nullTracer (toBearerInfo <$> script) $ \snocket getUnivState ->
+        withAsync
+          (runServer serverAddr snocket (close snocket)
+                     acceptOne (assertUniverseState clientAddr
+                                                    serverAddr
+                                                    getUnivState))
+          $ \serverAsync -> do
+            _ <- runClient clientAddr serverAddr
+                            snocket (close snocket)
+            wait serverAsync
+
+prop_connect_and_not_close :: BearerInfoScript -> Property
+prop_connect_and_not_close (BearerInfoScript script) =
+    prop_verify_simulation sim
+  where
+    sim :: forall s . IOSim s (Either SomeException ())
+    sim =
+      withSnocket nullTracer (toBearerInfo <$> script) (\snocket _ ->
+        withAsync
+          (runServer (TestAddress (0 :: Int)) snocket (\_ -> pure ())
+                     acceptOne return)
+          $ \serverAsync -> do
+            res <- runClient (TestAddress 1) (TestAddress 0)
+                            snocket (\_ -> pure ())
+            _ <- wait serverAsync
+            return res
+                                                       )
+      `catch` \(err :: SomeException) ->
+        -- Should error with NotReleasedListeningSockets
+        case fromException err
+               :: Maybe (ResourceException (TestAddress Int)) of
+          Just _ ->
+            return (Right ())
+          Nothing ->
+            return (Left err)
+
+prop_connect_to_not_accepting_socket :: BearerInfoScript -> Property
+prop_connect_to_not_accepting_socket (BearerInfoScript script) =
+    prop_verify_simulation sim
+  where
+    sim :: forall s . IOSim s (Either SomeException ())
+    sim =
+      withSnocket nullTracer (toBearerInfo <$> script) $ \snocket _ ->
+        withAsync (runServer (TestAddress (0 :: Int)) snocket
+                             (close snocket) loop return)
+          $ \_ -> do
+            res <- runClient (TestAddress 1) (TestAddress 0)
+                            snocket (close snocket)
+            case res of
+              -- Should timeout
+              Left _ -> return (Right ())
+              Right _ -> return (Left (toException UnexpectedOutcome))
+
+    loop :: MonadDelay m => a -> m b
+    loop a = do
+      threadDelay 10000
+      loop a
+
+prop_connect_to_uninitialised_socket :: BearerInfoScript -> Property
+prop_connect_to_uninitialised_socket (BearerInfoScript script) =
+    prop_verify_simulation sim
+  where
+    sim :: forall s . IOSim s (Either SomeException ())
+    sim =
+      withSnocket nullTracer (toBearerInfo <$> script) $ \snocket _ -> do
+        res <- runClient (TestAddress (1 :: Int)) (TestAddress 0)
+                        snocket (close snocket)
+        case res of
+          -- Should complain about no such listening socket
+          Left _ -> return (Right ())
+          Right _ -> return (Left (toException UnexpectedOutcome))
+
+prop_connect_to_not_listening_socket :: BearerInfoScript -> Property
+prop_connect_to_not_listening_socket (BearerInfoScript script) =
+    prop_verify_simulation sim
+  where
+    sim :: forall s . IOSim s (Either SomeException ())
+    sim =
+      withSnocket nullTracer (toBearerInfo <$> script) $ \snocket _ ->
+        withAsync (runServerNotListening (TestAddress (0 :: Int)) snocket
+                                         (close snocket) acceptOne)
+          $ \_ -> do
+            res <- runClient (TestAddress (1 :: Int)) (TestAddress 0)
+                            snocket (close snocket)
+            case res of
+              -- Should complain about no such listening socket
+              Left _ -> return (Right ())
+              Right _ -> return (Left (toException UnexpectedOutcome))
+
+    runServerNotListening
+      :: ( MonadThread m
+         , MonadThrow m
+         )
+      => TestAddress addr -- ^ Local Address
+      -> Snocket m fd (TestAddress addr)
+      -> (fd -> m ()) -- ^ Resource cleanup function (socket close)
+      -> (m (Accept m fd (TestAddress addr)) -> m (Either SomeException fd))
+      -- ^ Accepting function
+      -> m (Either SomeException ())
+    runServerNotListening localAddress snocket closeF acceptF = do
+      labelThisThread "server"
+      bracket (open snocket TestFamily)
+              closeF
+              (\fd -> do
+                bind snocket fd localAddress
+                mbFd <- acceptF (accept snocket fd)
+                traverse_ (close snocket) mbFd
+                return (void mbFd)
+              )
+
+
+prop_simultaneous_open :: BearerInfoScript -> Property
+prop_simultaneous_open (BearerInfoScript script) =
+    prop_verify_simulation sim
+  where
+    sim :: forall s . IOSim s (Either SomeException ())
+    sim =
+      withSnocket nullTracer (toBearerInfo <$> script) $ \snocket getUnivState ->
+        withAsync
+          (listenAndConnect (TestAddress (0 :: Int)) (TestAddress 1)
+                            snocket getUnivState)
+          $ \clientAsync -> do
+            _ <- listenAndConnect (TestAddress 1) (TestAddress 0)
+                                 snocket getUnivState
+            wait clientAsync
 
 --
 -- Utils
 --
+
+runServer
+  :: ( MonadThread m
+     , MonadThrow m
+     )
+  => TestAddress addr -- ^ Local Address
+  -> Snocket m fd (TestAddress addr)
+  -> (fd -> m ()) -- ^ Resource cleanup function (socket close)
+  -> (m (Accept m fd (TestAddress addr)) -> m (Either SomeException fd))
+  -- ^ Accepting function
+  -> (Either SomeException fd -> m (Either SomeException fd))
+  -- ^ Assert UniverseState
+  -> m (Either SomeException ())
+runServer localAddress snocket closeF acceptF assertUS = do
+    labelThisThread "server"
+    bracket (open snocket TestFamily)
+            closeF
+            (\fd -> do
+              bind snocket fd localAddress
+              listen snocket fd
+              mbFd <- acceptF (accept snocket fd)
+              mbFd' <- assertUS mbFd
+              traverse_ closeF mbFd'
+              return (void mbFd')
+            )
+
+acceptOne :: MonadMask m => m (Accept m fd addr) -> m (Either SomeException fd)
+acceptOne accept = mask_ $ do
+  accept0 <- accept
+  (accepted, _) <- runAccept accept0
+  case accepted of
+    Accepted fd' _ -> do
+      return (Right fd')
+    AcceptFailure err ->
+      return (Left err)
+
+runClient
+  :: ( MonadThread m
+     , MonadCatch m
+     )
+  => addr -- ^ Local Address
+  -> addr -- ^ Remote Address
+  -> Snocket m fd addr
+  -> (fd -> m ()) -- ^ Resource cleanup function (socket close)
+  -> m (Either SomeException ())
+runClient localAddress remoteAddress snocket closeF = do
+    labelThisThread "client"
+    bracket (openToConnect snocket localAddress)
+            closeF
+            $ \fd -> do
+              bind snocket fd localAddress
+              Right <$> connect snocket fd remoteAddress
+              `catch` (\(e :: SomeException) -> return (Left e))
+
+listenAndConnect
+  :: ( MonadThread m
+     , MonadCatch m
+     , Ord addr
+     )
+  => TestAddress addr -- ^ Local Address
+  -> TestAddress addr -- ^ Remote Address
+  -> Snocket m fd (TestAddress addr)
+  -> m (ObservableNetworkState (TestAddress addr))
+  -> m (Either SomeException ())
+listenAndConnect localAddress remoteAddress snocket getUnivState = do
+    labelThisThread "connectingServer"
+    bracket (open snocket TestFamily)
+            (close snocket)
+            $ \fd -> do
+              bind snocket fd localAddress
+              listen snocket fd
+              bracket (openToConnect snocket localAddress)
+                      (close snocket)
+                      $ \fd' -> do
+                        bind snocket fd' localAddress
+                        res <- (Right <$> connect snocket fd' remoteAddress)
+                              `catch` (\(e :: SomeException) -> return (Left e))
+                        assertUniverseState localAddress remoteAddress
+                                            getUnivState res
+
+-- | Asserts that the local address and remote address pair exists in the
+-- NetworkState.
+assertUniverseState :: (Monad m, Ord addr)
+                    => addr -- ^ Local Address
+                    -> addr -- ^ Remote Address
+                    -> m (ObservableNetworkState addr)
+                    -> Either SomeException b
+                    -> m (Either SomeException b)
+assertUniverseState localAddress remoteAddress getUnivState res = do
+  us <- usConnections <$> getUnivState
+  -- Important to use serverAddr as first argument
+  let normalisedId = normaliseId localAddress remoteAddress
+  case Map.lookup normalisedId us of
+    Just _ -> return res
+    Nothing -> case res of
+      Right _ -> do
+        return (Left (toException UnexpectedOutcome))
+      Left _ -> return res
+
+-- | Safe constructor of 'NormalisedId'
+--
+normaliseId :: Ord addr
+            => addr
+            -> addr
+            -> NormalisedId addr
+normaliseId localAddress remoteAddress
+    | localAddress <= remoteAddress
+    = UnsafeNormalisedId localAddress remoteAddress
+    | otherwise
+    = UnsafeNormalisedId remoteAddress localAddress
 
 traceTime :: MonadMonotonicTime m => Tracer m (Time, a) -> Tracer m a
 traceTime = contramapM (\a -> (,a) <$> getMonotonicTime)
