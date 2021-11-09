@@ -55,7 +55,7 @@ import           Ouroboros.Network.Channel
 import           Ouroboros.Network.Snocket
 import           Ouroboros.Network.Util.ShowProxy
 import           Ouroboros.Network.Testing.Utils (Delay (..))
-import           Simulation.Network.Snocket
+import           Simulation.Network.Snocket (FD, BearerInfo (..), withSnocket)
 
 import           Network.Mux
 import           Network.Mux.Types (SDUSize (..))
@@ -69,19 +69,19 @@ import           Test.Ouroboros.Network.Orphans ()  -- ShowProxy ReqResp instanc
 -- ShowProxy ReqResp instance
 import           Ouroboros.Network.Testing.Data.Script
                   (Script(..), singletonScript)
+import           Ouroboros.Network.Testing.Data.AbsBearerInfo
 
 import           Test.QuickCheck hiding (Result (..))
 import           Test.QuickCheck.Instances.ByteString
 import           Test.Tasty (TestTree, testGroup)
 import           Test.Tasty.QuickCheck (testProperty)
-import Ouroboros.Network.Testing.Data.AbsBearerInfo
 
 
 tests :: TestTree
 tests =
     testGroup "Simulation.Network.Snocket"
-    [ testProperty "client-server" prop_client_server
-    ]
+      [ testProperty "client-server" prop_client_server
+      ]
 
 type TestAddr      = TestAddress Int
 type TestFD      m = FD m TestAddr
@@ -341,7 +341,7 @@ toBearerInfo abi =
 -- Properties
 --
 
-prop_client_server :: [ByteString] -> Script BearerInfoScript -> Property
+prop_client_server :: [ByteString] -> Script AbsBearerInfoScript -> Property
 prop_client_server payloads (Script script) =
     let tr = runSimTrace $ clientServerSimulation script' payloads
     in -- Debug.traceShow script $
@@ -360,7 +360,7 @@ prop_client_server payloads (Script script) =
          Right (Just b) -> property b
   where
     Script noAttenuationScript =
-      singletonScript (BearerInfoScript (singletonScript absNoAttenuation))
+      singletonScript (AbsBearerInfoScript (singletonScript absNoAttenuation))
     script' =
       (toBearerInfo <$>) . unBIScript <$> Script (script <> noAttenuationScript)
 
