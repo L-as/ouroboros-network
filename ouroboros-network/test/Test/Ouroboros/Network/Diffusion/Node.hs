@@ -3,6 +3,8 @@
 {-# LANGUAGE NamedFieldPuns        #-}
 {-# LANGUAGE QuantifiedConstraints #-}
 {-# LANGUAGE ScopedTypeVariables   #-}
+{-# LANGUAGE UndecidableInstances  #-}
+{-# LANGUAGE TypeApplications      #-}
 
 module Test.Ouroboros.Network.Diffusion.Node
   ( -- * run a node
@@ -19,7 +21,7 @@ module Test.Ouroboros.Network.Diffusion.Node
   , NtCFD
 
     -- * extra types used by the node
-  , AcceptedConnectionsLimit (..)
+  , AcceptedConnectionsLimit(..)
   , DiffusionMode (..)
   , LedgerPeersConsensusInterface (..)
   , PeerAdvertise (..)
@@ -29,17 +31,21 @@ module Test.Ouroboros.Network.Diffusion.Node
   ) where
 
 import           Control.Monad.Class.MonadAsync
-import           Control.Monad.Class.MonadFork
-import           Control.Monad.Class.MonadST
+                   ( MonadAsync(wait, Async, withAsync) )
+import           Control.Monad.Class.MonadFork ( MonadFork )
+import           Control.Monad.Class.MonadST ( MonadST )
 import           Control.Monad.Class.MonadSTM.Strict
+                   ( MonadSTM(atomically, STM), newTVar, MonadLabelledSTM )
 import qualified Control.Monad.Class.MonadSTM as LazySTM
-import           Control.Monad.Class.MonadTime
-import           Control.Monad.Class.MonadTimer
+import           Control.Monad.Class.MonadTime ( MonadTime, DiffTime )
+import           Control.Monad.Class.MonadTimer ( MonadTimer )
 import           Control.Monad.Class.MonadThrow
+                   ( MonadMask, MonadThrow, SomeException,
+                     MonadEvaluate )
 import           Control.Tracer (nullTracer)
 
 import qualified Data.IntPSQ as IntPSQ
-import           Data.IP (IP)
+import           Data.IP (IP (..))
 import           Data.Map (Map)
 import           Data.Set (Set)
 import qualified Data.Text as Text
@@ -58,25 +64,34 @@ import           Ouroboros.Network.NodeToNode.Version (DiffusionMode (..))
 import qualified Ouroboros.Network.NodeToNode as NtN
 import           Ouroboros.Network.Protocol.Handshake (HandshakeArguments (..))
 import           Ouroboros.Network.Protocol.Handshake.Codec
+                   ( noTimeLimitsHandshake,
+                     VersionDataCodec(..),
+                     timeLimitsHandshake )
 import           Ouroboros.Network.Protocol.Handshake.Unversioned
+                   ( unversionedHandshakeCodec, unversionedProtocolDataCodec )
 import           Ouroboros.Network.Protocol.Handshake.Version (Accept (Accept))
 import           Ouroboros.Network.RethrowPolicy
+                   ( ioErrorRethrowPolicy,
+                     mkRethrowPolicy,
+                     muxErrorRethrowPolicy,
+                     ErrorCommand(ShutdownNode) )
 import           Ouroboros.Network.PeerSelection.Governor
                    (PeerSelectionTargets (..))
 import           Ouroboros.Network.PeerSelection.LedgerPeers
-                  (LedgerPeersConsensusInterface (..), UseLedgerAfter (..))
+                   (LedgerPeersConsensusInterface (..), UseLedgerAfter (..))
 import           Ouroboros.Network.PeerSelection.PeerMetric (PeerMetrics (..))
 import           Ouroboros.Network.PeerSelection.RootPeersDNS (DomainAccessPoint (..),
                    LookupReqs (..), RelayAccessPoint (..))
 import           Ouroboros.Network.PeerSelection.Types (PeerAdvertise (..))
-import           Ouroboros.Network.Server.RateLimiting (AcceptedConnectionsLimit (..))
+import           Ouroboros.Network.Server.RateLimiting
+                   (AcceptedConnectionsLimit (..))
 import           Ouroboros.Network.Snocket (FileDescriptor (..), Snocket,
                    TestAddress (..))
 
 import           Ouroboros.Network.Testing.ConcreteBlock (Block)
-import qualified Ouroboros.Network.Testing.Data.Script as Script
-
+import           Ouroboros.Network.Testing.Data.Script (Script (..))
 import           Simulation.Network.Snocket
+                   ( AddressType(IPv4Address), FD )
 
 import           Test.Ouroboros.Network.Diffusion.Node.NodeKernel (NtNAddr,
                    NtNVersion, NtNVersionData (..), NtCAddr, NtCVersion,
@@ -91,7 +106,7 @@ data Interfaces m = Interfaces
     { iNtnSnocket        :: Snocket m (NtNFD m) NtNAddr
     , iAcceptVersion     :: NtNVersionData -> NtNVersionData -> Accept NtNVersionData
     , iNtnDomainResolver :: LookupReqs -> [DomainAccessPoint] -> m (Map DomainAccessPoint (Set NtNAddr))
-    , iNtcSnocket        :: Snocket m (NtCFD m) (NtCAddr)
+    , iNtcSnocket        :: Snocket m (NtCFD m) NtCAddr
     , iRng               :: StdGen
     , iDomainMap         :: Map Domain [IP]
     , iLedgerPeersConsensusInterface
@@ -102,8 +117,7 @@ type NtNFD m = FD m NtNAddr
 type NtCFD m = FD m NtCAddr
 
 data Arguments m = Arguments
-    { aIPv4Address          :: NtNAddr
-    , aIPv6Address          :: NtNAddr
+    { aIPAddress            :: NtNAddr
     , aAcceptedLimits       :: AcceptedConnectionsLimit
     , aDiffusionMode        :: DiffusionMode
     , aKeepAliveInterval    :: DiffTime
@@ -115,8 +129,8 @@ data Arguments m = Arguments
     , aReadUseLedgerAfter   :: STM m UseLedgerAfter
     , aProtocolIdleTimeout  :: DiffTime
     , aTimeWaitTimeout      :: DiffTime
-    , aDNSTimeoutScript     :: Script.Script DNSTimeout
-    , aDNSLookupDelayScript :: Script.Script DNSLookupDelay
+    , aDNSTimeoutScript     :: Script DNSTimeout
+    , aDNSLookupDelayScript :: Script DNSLookupDelay
     }
 
 -- The 'mockDNSActions' is not using \/ specifying 'resolverException', thus we
@@ -124,7 +138,7 @@ data Arguments m = Arguments
 --
 type ResolverException = SomeException
 
-run :: forall s resolver m.
+run :: forall resolver m.
        ( MonadAsync       m
        , MonadEvaluate    m
        , MonadFork        m
@@ -140,7 +154,7 @@ run :: forall s resolver m.
        , forall a. Semigroup a => Semigroup (m a)
        , Eq (Async m Void)
        )
-    => Node.BlockGeneratorArgs Block s
+    => Node.BlockGeneratorArgs Block StdGen
     -> Node.LimitsAndTimeouts Block
     -> Interfaces m
     -> Arguments m
@@ -187,10 +201,10 @@ run blockGeneratorArgs limits ni na =
               , Diff.P2P.diNtcGetFileDescriptor  = \_ -> pure (FileDescriptor (-1))
               , Diff.P2P.diRng                   = diffStgGen
               , Diff.P2P.diInstallSigUSR1Handler = \_ -> pure ()
-              , Diff.P2P.diDnsActions            = (const (mockDNSActions
+              , Diff.P2P.diDnsActions            = const (mockDNSActions
                                                      (iDomainMap ni)
                                                      dnsTimeoutScriptVar
-                                                     dnsLookupDelayScriptVar))
+                                                     dnsLookupDelayScriptVar)
               }
 
             tracersExtra :: Diff.P2P.TracersExtra NtNAddr NtNVersion NtNVersionData
@@ -243,8 +257,8 @@ run blockGeneratorArgs limits ni na =
 
     args :: Diff.Arguments (NtNFD m) NtNAddr (NtCFD m) NtCAddr
     args = Diff.Arguments
-      { Diff.daIPv4Address   = Just . Right . aIPv4Address $ na
-      , Diff.daIPv6Address   = Just . Right . aIPv6Address $ na
+      { Diff.daIPv4Address   = Right <$> (ntnToIPv4 . aIPAddress $ na)
+      , Diff.daIPv6Address   = Right <$> (ntnToIPv6 . aIPAddress $ na)
       , Diff.daLocalAddress  = Nothing
       , Diff.daAcceptedConnectionsLimit
                              = aAcceptedLimits na
@@ -270,3 +284,13 @@ run blockGeneratorArgs limits ni na =
       , Node.aaKeepAliveInterval        = aKeepAliveInterval na
       , Node.aaPingPongInterval         = aPingPongInterval na
       }
+
+--- Utils
+
+ntnToIPv4 :: NtNAddr -> Maybe NtNAddr
+ntnToIPv4 ntnAddr@(TestAddress (Node.IPAddr (IPv4 _) _)) = Just ntnAddr
+ntnToIPv4 (TestAddress _)                                = Nothing
+
+ntnToIPv6 :: NtNAddr -> Maybe NtNAddr
+ntnToIPv6 ntnAddr@(TestAddress (Node.IPAddr (IPv6 _) _)) = Just ntnAddr
+ntnToIPv6 (TestAddress _)                                = Nothing

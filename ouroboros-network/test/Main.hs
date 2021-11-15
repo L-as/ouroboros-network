@@ -17,6 +17,7 @@ import qualified Test.Ouroboros.Network.KeepAlive (tests)
 import qualified Test.Ouroboros.Network.NodeToNode.Version (tests)
 import qualified Test.Ouroboros.Network.NodeToClient.Version (tests)
 import qualified Test.Ouroboros.Network.TxSubmission (tests)
+import qualified Test.Ouroboros.Network.Testnet (tests)
 import qualified Ouroboros.Network.Protocol.ChainSync.Test (tests)
 import qualified Ouroboros.Network.Protocol.BlockFetch.Test (tests)
 import qualified Ouroboros.Network.Protocol.Handshake.Test (tests)
@@ -72,6 +73,7 @@ tests =
   , Test.Ouroboros.Network.TxSubmission.tests
   , Test.Ouroboros.Network.NodeToNode.Version.tests
   , Test.Ouroboros.Network.NodeToClient.Version.tests
+  , Test.Ouroboros.Network.Testnet.tests
   , Test.LedgerPeers.tests
   , Test.Ouroboros.Network.Diffusion.Policies.tests
 

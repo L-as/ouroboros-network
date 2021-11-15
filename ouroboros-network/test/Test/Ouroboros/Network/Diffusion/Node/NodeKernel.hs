@@ -25,7 +25,7 @@ module Test.Ouroboros.Network.Diffusion.Node.NodeKernel
   , NodeKernelError (..)
   ) where
 
-import           Control.Monad (when)
+import           Control.Monad (when, replicateM)
 import           Control.Monad.Class.MonadAsync
 import           Control.Monad.Class.MonadTime
 import           Control.Monad.Class.MonadTimer
@@ -63,6 +63,9 @@ import qualified Ouroboros.Network.Testing.ConcreteBlock as ConcreteBlock
 import           Simulation.Network.Snocket (AddressType (..),
                    GlobalAddressScheme (..))
 
+import           Test.QuickCheck (Arbitrary(..), oneof, chooseInt, choose)
+import Data.IP (IP(..), toIPv4, toIPv6)
+
 
 -- | Node-to-node address type.
 --
@@ -71,6 +74,18 @@ data NtNAddr_
   | EphemeralIPv6Addr Natural
   | IPAddr IP.IP PortNumber
   deriving (Eq, Ord)
+
+instance Arbitrary NtNAddr_ where
+  arbitrary = do
+    -- TODO: Move this IP generator to ouroboros-network-testing
+    a <- oneof [ IPv6 . toIPv6 <$> replicateM 8 (choose (0,0xffff))
+               , IPv4 . toIPv4 <$> replicateM 4 (choose (0,255))
+               ]
+    oneof
+      [ EphemeralIPv4Addr <$> (fromInteger <$> arbitrary)
+      , EphemeralIPv6Addr <$> (fromInteger <$> arbitrary)
+      , IPAddr a          <$> (read . show <$> chooseInt (0, 9999))
+      ]
 
 instance Show NtNAddr_ where
     show (EphemeralIPv4Addr n) = "ephemeral:" ++ show n
@@ -134,7 +149,7 @@ randomBlockGenerationArgs bgaSlotDuration bgaSeed quota =
                                       --
                                       $ ConcreteBlock.BlockBody (BSC.pack "")
                             in case randomR (0, 100) seed of
-                                (r, seed') | r <= quota -> 
+                                (r, seed') | r <= quota ->
                                              (Just block, seed')
                                            | otherwise  ->
                                              (Nothing, seed')
