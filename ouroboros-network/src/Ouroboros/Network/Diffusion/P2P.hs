@@ -35,7 +35,6 @@ module Ouroboros.Network.Diffusion.P2P
   where
 
 
-import           Control.Applicative (Alternative)
 import qualified Control.Monad.Class.MonadAsync as Async
 import           Control.Monad.Class.MonadAsync (Async, MonadAsync)
 import           Control.Monad.Class.MonadFork
@@ -579,8 +578,7 @@ runM
     :: forall m ntnFd ntnAddr ntnVersion ntnVersionData
                 ntcFd ntcAddr ntcVersion ntcVersionData
                 resolver resolverError.
-       ( Alternative      m
-       , MonadAsync       m
+       ( MonadAsync       m
        , MonadEvaluate    m
        , MonadFork        m
        , MonadLabelledSTM m
