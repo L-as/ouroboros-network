@@ -18,4 +18,5 @@ runCommand "check-nixpkgs-fmt"
     cp ./scripts/ci/check-nixpkgs-fmt.sh ./scripts/ci/patchedNixpkgsFmt.sh
     patchShebangs ./scripts/ci/patchedNixpkgsFmt.sh
     ./scripts/ci/patchedNixpkgsFmt.sh
+    echo $? >> $out
   ''

@@ -15,7 +15,8 @@ runCommand "check-stylish"
     git config advice.addIgnoredFile false
     git add *
     git commit -m "Hydra CI"
-    cp ./scripts/ci/check-stylish.sh ./scripts/ci/patchedCheckStylish.sh
-    patchShebangs ./scripts/ci/patchedCheckStylish.sh
-    ./scripts/ci/patchedCheckStylish.sh
+    cp ./scripts/ci/check-stylish.sh ./scripts/ci/patchedStylish.sh
+    patchShebangs ./scripts/ci/patchedStylish.sh
+    ./scripts/ci/patchedStylish.sh
+    echo $? >> $out
   ''
