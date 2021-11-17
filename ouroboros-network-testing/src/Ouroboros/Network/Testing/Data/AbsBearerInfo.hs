@@ -241,6 +241,7 @@ instance Arbitrary AbsBearerInfo where
       | a <- shrink (abiSDUSize abi)
       ]
 
+
 newtype BearerInfoScript = BearerInfoScript (Script AbsBearerInfo)
   deriving       Show via (Script AbsBearerInfo)
   deriving stock Eq
