@@ -5,10 +5,10 @@
         "homepage": "https://input-output-hk.github.io/haskell.nix",
         "owner": "input-output-hk",
         "repo": "haskell.nix",
-        "rev": "8aa77fdbd848fe043551e653d837248b4bb76afd",
-        "sha256": "0shqr33kjivb9g8l97rsfhfdqngqd0m5m70pzc06hq2ldf9z9n5i",
+        "rev": "64cd5f70ce0d619390039a1a3d57c442552b0924",
+        "sha256": "14v09rh7apjs5r6px7h0dglrz56mzj0zp9hq8ji8y4s2422k1h0l",
         "type": "tarball",
-        "url": "https://github.com/input-output-hk/haskell.nix/archive/8aa77fdbd848fe043551e653d837248b4bb76afd.tar.gz",
+        "url": "https://github.com/input-output-hk/haskell.nix/archive/64cd5f70ce0d619390039a1a3d57c442552b0924.tar.gz",
         "url_template": "https://github.com/<owner>/<repo>/archive/<rev>.tar.gz"
     },
     "hls-released": {
@@ -49,16 +49,16 @@
         "url_template": "https://github.com/<owner>/<repo>/archive/<rev>.tar.gz"
     },
     "stylish-haskell": {
-        "branch": "main",
+        "branch": "refs/tags/v0.13.0.0",
         "builtin": false,
         "description": "Haskell code prettifier",
         "homepage": "",
         "owner": "haskell",
         "repo": "stylish-haskell",
-        "rev": "3d5348041e2efbcae95f1c62ace5ac0ffd9629d2",
-        "sha256": "1rms68fll6w1rzdg9ppjs9g246mbgxi5589vxb8r8pcn5v1ncfj2",
+        "rev": "1c716235a72474c5a4e65b07f4f3a32602cda231",
+        "sha256": "1lxg1pjm005l7mhf2bmbz8wi6v872xwjc1yvavz12ndq8asli8h1",
         "type": "tarball",
-        "url": "https://github.com/haskell/stylish-haskell/archive/3d5348041e2efbcae95f1c62ace5ac0ffd9629d2.tar.gz",
+        "url": "https://github.com/haskell/stylish-haskell/archive/1c716235a72474c5a4e65b07f4f3a32602cda231.tar.gz",
         "url_template": "https://github.com/<owner>/<repo>/archive/<rev>.tar.gz"
     }
 }
