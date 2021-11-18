@@ -625,7 +625,7 @@ mkNodeKernelArgs
       { bfcMaxConcurrencyBulkSync = 1
       , bfcMaxConcurrencyDeadline = 1
       , bfcMaxRequestsInflight    = blockFetchPipeliningMax defaultMiniProtocolParameters
-      , bfcDecisionLoopInterval   = 0.01 -- 10ms
+      , bfcDecisionLoopInterval   = 0.05 -- 10ms
       , bfcSalt
       }
 
