@@ -53,6 +53,7 @@ import qualified Data.List.Trace as Trace
 import qualified Data.Map.Strict as Map
 import           Data.Maybe (fromMaybe, fromJust, isJust)
 import           Data.Monoid (Sum (..))
+import qualified Data.Set as Set
 import           Data.Typeable (Typeable)
 import           Data.Void (Void)
 
@@ -2459,7 +2460,11 @@ prop_inbound_governor_pruning serverAcc
 -- | Property wrapping `multinodeExperiment` that has a generator optimized for triggering
 -- pruning, and random generated number of connections hard limit.
 --
--- We test that we never go above hard limit of incoming connections.
+-- We test that:
+--
+-- * we never go above hard limit of incoming connections;
+-- * the pruning set is at least as big as expected, and that
+--   the picked peers belong to the choice set.
 --
 prop_never_above_hardlimit :: Int -> MultiNodePruningScript Int -> Property
 prop_never_above_hardlimit serverAcc
@@ -2508,6 +2513,19 @@ prop_never_above_hardlimit serverAcc
                                      )
                     . property
                     $ incomingConns cmc <= fromIntegral hardlimit
+                (TrPruneConnections prunnedSet numberToPrune choiceSet) ->
+                  ( AllProperty
+                  . counterexample (concat
+                                   [ "prunned set too small: "
+                                   , show numberToPrune
+                                   , " ≰ "
+                                   , show $ length prunnedSet
+                                   ])
+                  $ numberToPrune <= length prunnedSet )
+                  <>
+                  ( AllProperty
+                  . counterexample ""
+                  $ prunnedSet `Set.isSubsetOf` choiceSet )
                 _ -> mempty
         )
    $ evsCMT
